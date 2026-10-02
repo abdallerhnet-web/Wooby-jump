@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>WOOBY JUMP</title>
+<style>
+  html,body{margin:0;height:100%;background:#7cc3f0;overflow:hidden;touch-action:manipulation;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+    font-family:"Arial Black",Impact,"Trebuchet MS",sans-serif}
+  #wrap{height:100%;display:flex;align-items:center;justify-content:center}
+  #stage{position:relative;width:min(100vw,calc(100vh * 9 / 16));height:min(100vh,calc(100vw * 16 / 9));background:#a8e4ff;overflow:hidden}
+  canvas{width:100%;height:100%;display:block}
+  .screen{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:24px;background:rgba(168,228,255,.93);color:#1c1445}
+  .screen.on{display:flex}
+  h1{font-size:clamp(28px,9vw,44px);margin:0 0 12px;line-height:1.05;color:#ff5fa8;
+    text-shadow:2px 2px 0 #1c1445,-2px -2px 0 #1c1445,2px -2px 0 #1c1445,-2px 2px 0 #1c1445,0 3px 0 #1c1445}
+  .screen p{font-family:"Trebuchet MS",sans-serif;font-weight:700;font-size:clamp(15px,4.6vw,19px);margin:5px 0;max-width:20em}
+  .big{font-size:clamp(34px,12vw,56px);color:#ff5fa8;margin-top:10px;
+    text-shadow:2px 2px 0 #1c1445,-2px -2px 0 #1c1445,2px -2px 0 #1c1445,-2px 2px 0 #1c1445}
+  .row{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap;justify-content:center}
+  button{font:inherit;font-size:clamp(16px,5vw,22px);color:#fff;background:#ff5fa8;border:3px solid #1c1445;
+    border-bottom-width:7px;border-radius:16px;padding:10px 26px;cursor:pointer}
+  button.alt{background:#1c1445}
+  button:active{transform:translateY(4px);border-bottom-width:3px}
+  #mute{position:absolute;top:8px;right:8px;z-index:5;width:42px;height:42px;padding:0;font-size:18px;border-radius:50%;background:#fff;border-width:3px;border-bottom-width:5px}
+  #lose{background:rgba(255,60,70,.94);color:#fff}
+  #lose h1{color:#fff}
+</style>
+</head>
+<body>
+<div id="wrap"><div id="stage">
+  <canvas id="c"></canvas>
+  <button id="mute" aria-label="Sound on/off">🔊</button>
+
+  <div class="screen on" id="start">
+    <h1>WOOBY<br>JUMP</h1>
+    <p>TAP to jump. Tap again in the air to double jump.</p>
+    <p>🔴 Eat red &nbsp; 🟢 Jump green &nbsp; 🟡 Heal</p>
+    <p>Clear 3 levels. More coming soon!</p>
+    <p id="bestInfo"></p>
+    <div class="row"><button id="playBtn">PLAY</button><button class="alt" id="shareBtn0">SHARE</button></div>
+  </div>
+
+  <div class="screen" id="lose">
+    <h1>Too much red.</h1>
+    <p id="loseInfo"></p>
+    <div class="row"><button id="retryBtn">RETRY</button><button class="alt" id="shareBtn1">SHARE</button></div>
+  </div>
+
+  <div class="screen" id="win">
+    <h1>Level 3 cleared!</h1>
+    <p>No team bags. No presale. Just better.</p>
+    <p>More levels coming soon 👻</p>
+    <div class="big">$WOOBY</div>
+    <p id="winInfo"></p>
+    <div class="row"><button id="againBtn">PLAY AGAIN</button><button class="alt" id="shareBtn2">SHARE</button></div>
+  </div>
+</div></div>
+
+<script>
+/* ================= TWEAK ME ================= */
+const ZONES = [   // 3 levels. reds = red candles to eat | speed = run speed (px/sec) | gap = seconds between obstacles | green = chance of a green wall
+  { name: "Fresh Mint",   reds: 12, speed: 220, gap: 1.3,  green: 0.25 },
+  { name: "Pump It",      reds: 14, speed: 260, gap: 1.15, green: 0.35 },
+  { name: "Candle Storm", reds: 16, speed: 300, gap: 1.0,  green: 0.45 }
+  // MORE LEVELS COMING SOON: add another { name, reds, speed, gap, green } line here
+];
+const CFG = {
+  HEARTS: 3,         // lives
+  GOLD_CHANCE: 0.07, // chance of a gold (heal) candle, from zone 2 on
+  COMBO_STEP: 5,     // reds in a row per multiplier step
+  MAX_MULT: 5,       // multiplier cap
+  RAMP: 5,           // extra px/sec added each second inside a zone
+  JUMP: 620,         // jump power (bigger = higher)
+  JUMP2: 560,        // double jump power
+  GRAVITY: 1700,     // fall strength
+  INVULN: 1.2        // seconds of safety after getting hit
+};
+const TARGET = "@woobyonsol";  // handle added to the share post
+/* ============================================ */
+
+const TOTAL = ZONES.reduce((a, z) => a + z.reds, 0);
+const W = 360, H = 640, DPR = 2, GY = 520, PX = 84;
+const NAVY = '#1c1445', PINK = '#ff5fa8';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+cv.width = W * DPR; cv.height = H * DPR; ctx.scale(DPR, DPR);
+
+// dotted sky tile (scrolls slowly), matches the $WOOBY art
+const dots = document.createElement('canvas'); dots.width = (W + 20) * DPR; dots.height = H * DPR;
+(function(){
+  const b = dots.getContext('2d'); b.scale(DPR, DPR);
+  b.fillStyle = 'rgba(70,150,200,.35)';
+  for (let y = 10; y < H; y += 20) for (let x = 10; x < W + 20; x += 20) { b.beginPath(); b.arc(x, y, 1.3, 0, 7); b.fill(); }
+})();
+// faint candle skyline in the background
+const sky = Array.from({ length: 10 }, (_, i) => ({ x: i * 44, h: 40 + Math.random() * 120, g: Math.random() < .5 }));
+
+let best = 0; try { best = +localStorage.getItem('wooby_best') || 0; } catch (e) {}
+let state = 'start', t = 0, dist = 0, zone = 0, zoneReds = 0, zoneT = 0, total = 0, hearts = 3, combo = 0, score = 0, spawnT = 0;
+let py = GY, vy = 0, jumps = 0, mouth = 0, invuln = 0, flash = 0, shake = 0, banner = 0, hurt = 0;
+let objs = [], sparks = [], floats = [];
+const $ = id => document.getElementById(id);
+const pctNow = () => 100 + 0.1 * total / TOTAL;
+function show(id){ ['start','lose','win'].forEach(s => $(s).classList.toggle('on', s === id)); }
+$('bestInfo').textContent = best ? 'Best score: ' + best : '';
+
+let ac = null;
+let muted = false;
+function beep(f, d, type, v){ if (muted) return; try {
+  ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+  if (ac.state === 'suspended') ac.resume();
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || 'sine'; o.frequency.value = f; g.gain.value = v || .08;
+  g.gain.exponentialRampToValueAtTime(.001, ac.currentTime + d);
+  o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + d);
+} catch (e) {} }
+// background music: a short happy loop that plays while you run (mute button top-right)
+const MEL = [523,659,784,659,880,784,659,587, 523,659,784,1047,880,784,659,587];
+const BASS = [131,131,196,196,175,175,196,196];
+let mstep = 0;
+setInterval(() => {
+  if (muted || state !== 'play') return;
+  beep(MEL[mstep % 16], .14, 'triangle', .035);
+  if (mstep % 2 === 0) beep(BASS[(mstep >> 1) % 8], .22, 'sine', .05);
+  mstep++;
+}, 170);   // lower number = faster music
+$('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? '🔇' : '🔊'; if (!muted) beep(660, .1); };
+function buzz(n){ try { navigator.vibrate && navigator.vibrate(n); } catch (e) {} }
+
+function reset(){
+  zone = 0; zoneReds = 0; zoneT = 0; total = 0; hearts = CFG.HEARTS; combo = 0; score = 0; dist = 0;
+  objs = []; sparks = []; floats = []; py = GY; vy = 0; jumps = 0; invuln = 0; spawnT = 1.4; banner = 1.8;
+  state = 'play'; show(null); beep(520, .15); setTimeout(() => beep(780, .2), 120);
+}
+
+/* ---------- spawning ---------- */
+function red(x, y){ objs.push({ x, y, k: 'r', w: 24, h: 40 }); }
+function wall(x, h){ objs.push({ x, y: GY - h / 2, k: 'g', w: 34, h }); }
+function spawn(){
+  const Z = ZONES[zone], x0 = W + 40, r = Math.random(), r2 = Math.random();
+  let len = 120;
+  if (zone > 0 && Math.random() < CFG.GOLD_CHANCE) { objs.push({ x: x0, y: GY - 110, k: 'gold', w: 26, h: 40 }); len = 40; }
+  else if (r < Z.green) {
+    const h = 55 + Math.random() * 30; wall(x0, h);
+    if (r2 < .5) { for (let i = 0; i < 3; i++) red(x0 - 44 + i * 44, GY - h - 50 - (i === 1 ? 28 : 0)); len = 110; }  // reward arc over the wall
+    if (zone >= 2 && r2 > .75) { wall(x0 + 110, 55 + Math.random() * 30); len = 160; }                               // double wall
+  } else if (r2 < .45) { const n = 3 + (Math.random() * 2 | 0); for (let i = 0; i < n; i++) red(x0 + i * 44, GY - 30); len = n * 44; }  // ground row
+  else if (r2 < .8) { for (let i = 0; i < 4; i++) red(x0 + i * 40, GY - 30 - Math.sin(Math.PI * i / 3) * 95); len = 160; }               // jump arc
+  else { red(x0, GY - 190); red(x0 + 40, GY - 190); len = 80; }                                                                        // double-jump pair
+  spawnT = Z.gap + len / (Z.speed + CFG.RAMP * zoneT);
+}
+
+function burst(x, y, cols){
+  for (let i = 0; i < 16; i++) {
+    const a = Math.random() * 6.283, v = 70 + Math.random() * 120;
+    sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 50, life: .7, s: 4 + Math.random() * 5, c: cols[i % cols.length] });
+  }
+}
+function say(txt, col, y){ floats.push({ x: PX + 70, y: y || py - 130, txt, col, life: .9 }); }
+
+function jump(){
+  if (state !== 'play') return;
+  if (jumps >= 2) return;
+  vy = jumps === 0 ? -CFG.JUMP : -CFG.JUMP2; jumps++;
+  beep(jumps === 1 ? 330 : 460, .12, 'square', .04);
+}
+function hit(){
+  hearts--; combo = 0; invuln = CFG.INVULN; flash = .35; shake = .3; hurt = .6; buzz(80); beep(110, .3, 'sawtooth', .1);
+  if (hearts <= 0) { [330,262,196,131].forEach((f, i) => setTimeout(() => beep(f, .3, 'sawtooth', .07), i * 160)); state = 'lost'; setTimeout(showLose, 800); }
+}
+function eat(o){
+  o.dead = true; mouth = .25; buzz(10);
+  if (o.k === 'gold') {
+    hearts = Math.min(CFG.HEARTS, hearts + 1); score += 50; say('+1 HEART', '#ffb700');
+    burst(o.x, o.y, ['#ffd23f', '#fff']); beep(900, .25, 'triangle'); return;
+  }
+  combo++; total++; zoneReds++;
+  const mult = Math.min(CFG.MAX_MULT, 1 + Math.floor(combo / CFG.COMBO_STEP));
+  score += 10 * mult;
+  burst(o.x, o.y, [PINK, '#fff', '#ff9ccc']);
+  beep(400 + Math.min(combo, 20) * 30, .1, 'triangle');
+  if (combo % CFG.COMBO_STEP === 0) say('COMBO x' + mult, '#7c3aed');
+  if (total >= TOTAL) { state = 'won'; best = Math.max(best, score); saveBest(); setTimeout(showWin, 900); [523,659,784,1047].forEach((f, i) => setTimeout(() => beep(f, .3, 'triangle', .09), i * 140)); return; }
+  if (zoneReds >= ZONES[zone].reds) { zone++; zoneReds = 0; zoneT = 0; banner = 1.8; beep(700, .2); }
+}
+function saveBest(){ try { localStorage.setItem('wooby_best', best); } catch (e) {} }
+
+/* ---------- update ---------- */
+function update(dt){
+  t += dt; mouth = Math.max(0, mouth - dt); flash = Math.max(0, flash - dt); shake = Math.max(0, shake - dt);
+  hurt = Math.max(0, hurt - dt); invuln = Math.max(0, invuln - dt); banner = Math.max(0, banner - dt);
+  sparks.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 240 * dt; p.life -= dt; });
+  sparks = sparks.filter(p => p.life > 0);
+  floats.forEach(f => { f.y -= 40 * dt; f.life -= dt; }); floats = floats.filter(f => f.life > 0);
+  if (state === 'start') { dist += 120 * dt; return; }
+  if (state === 'lost') { return; }
+  const sp = state === 'won' ? 120 : ZONES[zone].speed + CFG.RAMP * zoneT;
+  dist += sp * dt;
+  if (py < GY || vy < 0) { vy += CFG.GRAVITY * dt; py += vy * dt; if (py >= GY) { py = GY; vy = 0; jumps = 0; } }
+  if (state !== 'play') return;
+  zoneT += dt; score += Math.round(sp * dt / 20);
+  spawnT -= dt; if (spawnT <= 0) spawn();
+  const hb = { l: PX - 24, r: PX + 24, t: py - 80, b: py };
+  for (const o of objs) {
+    o.x -= sp * dt;
+    if (o.dead) continue;
+    if (o.k === 'g') {
+      const ok = invuln <= 0 && hb.r - 6 > o.x - o.w / 2 && hb.l + 6 < o.x + o.w / 2 && hb.b - 4 > o.y - o.h / 2;
+      if (ok) { o.dead = true; hit(); if (state !== 'play') return; }
+    } else {
+      if (hb.r > o.x - o.w / 2 - 6 && hb.l < o.x + o.w / 2 + 6 && hb.b > o.y - o.h / 2 - 6 && hb.t < o.y + o.h / 2 + 6) { eat(o); if (state !== 'play') return; }
+      else if (o.k === 'r' && o.x < PX - 50 && !o.missed) { o.missed = true; combo = 0; }
+    }
+  }
+  objs = objs.filter(o => o.x > -60 && !o.dead);
+}
+
+function showLose(){
+  best = Math.max(best, score); saveBest();
+  $('loseInfo').innerHTML = 'Level ' + (zone + 1) + ' · Score ' + score + ' · Best ' + best + '<br>Almost! Tap retry and go again.';
+  show('lose');
+}
+function showWin(){ $('winInfo').innerHTML = 'Score ' + score + ' · Best ' + best; show('win'); }
+function share(){
+  const url = location.href.split('#')[0];
+  const msg = score > 0 ? "I got " + score + " on WOOBY JUMP 👻 (Level " + (zone + 1) + "). Can you beat me?\n$WOOBY " + TARGET
+                        : "Play WOOBY JUMP 👻 Jump, eat the red candles, dodge the green.\n$WOOBY " + TARGET;
+  if (navigator.share) navigator.share({ title: 'WOOBY JUMP', text: msg, url }).catch(() => {});
+  else window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent(msg) + '&url=' + encodeURIComponent(url), '_blank');
+}
+
+/* ---------- drawing ---------- */
+function outText(txt, x, y, size, fill, align){
+  ctx.font = '900 ' + size + 'px "Arial Black",Impact,sans-serif'; ctx.textAlign = align || 'center';
+  ctx.lineJoin = 'round'; ctx.lineWidth = size / 4; ctx.strokeStyle = NAVY; ctx.strokeText(txt, x, y);
+  ctx.fillStyle = fill; ctx.fillText(txt, x, y);
+}
+function star(x, y, r){
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, rr = i % 2 ? r * .35 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fill();
+}
+function drawCandle(o){
+  const col = o.k === 'g' ? '#2fd87a' : o.k === 'gold' ? '#ffd23f' : '#ff4a4a';
+  ctx.strokeStyle = NAVY; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(o.x, o.y - o.h / 2 - 12); ctx.lineTo(o.x, o.y + o.h / 2 + (o.k === 'g' ? 0 : 12)); ctx.stroke();
+  ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect(o.x - o.w / 2, o.y - o.h / 2, o.w, o.h, 6); ctx.fill(); ctx.stroke();
+  if (o.k === 'gold') { ctx.fillStyle = NAVY; ctx.font = '900 15px Arial'; ctx.textAlign = 'center'; ctx.fillText('♥', o.x, o.y + 5); }
+}
+function drawWooby(){
+  const air = py < GY, run = air ? 0 : Math.sin(t * 16);
+  const sx = air ? .92 : 1 + run * .04, sy = air ? 1.1 : 1 - run * .05;
+  if (invuln > 0 && Math.floor(t * 14) % 2) return;       // blink when hurt
+  ctx.fillStyle = 'rgba(28,20,69,.18)';                   // shadow
+  const sh = Math.max(.4, 1 - (GY - py) / 260);
+  ctx.beginPath(); ctx.ellipse(PX, GY + 6, 30 * sh, 7 * sh, 0, 0, 7); ctx.fill();
+  ctx.save();
+  ctx.translate(PX, py - Math.abs(run) * 3); ctx.scale(.52 * sx, .52 * sy); ctx.translate(0, -62);
+  ctx.fillStyle = PINK; ctx.strokeStyle = NAVY; ctx.lineWidth = 8; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-62, 62);
+  ctx.bezierCurveTo(-90, -6, -56, -92, 0, -92);
+  ctx.bezierCurveTo(56, -92, 90, -6, 62, 62);
+  ctx.quadraticCurveTo(48, 80, 31, 66);
+  ctx.quadraticCurveTo(16, 54, 0, 68);
+  ctx.quadraticCurveTo(-16, 82, -31, 66);
+  ctx.quadraticCurveTo(-48, 54, -62, 62);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(2, -36, 52, Math.PI * 1.1, Math.PI * 1.36); ctx.stroke();
+  for (const ex of [-18, 30]) {                            // eyes look forward (right)
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = NAVY; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.ellipse(ex, -22, 15, 20, 0, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = NAVY; ctx.beginPath(); ctx.arc(ex + 6, -22 + (air ? -3 : 0), hurt > 0 ? 3 : 6.5, 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = '#e0388c';
+  ctx.beginPath(); ctx.ellipse(-40, 8, 10, 6, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(52, 8, 10, 6, 0, 0, 7); ctx.fill();
+  if (mouth > 0 || state === 'won') {
+    ctx.fillStyle = NAVY; ctx.beginPath(); ctx.ellipse(18, 14, 17, 19, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ff7fb0'; ctx.beginPath(); ctx.ellipse(18, 24, 10, 7, 0, 0, 7); ctx.fill();
+  } else if (hurt > 0) {
+    ctx.strokeStyle = NAVY; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(18, 24, 10, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+  } else {
+    ctx.fillStyle = NAVY; ctx.beginPath(); ctx.arc(18, 8, 13, .1, Math.PI - .1); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawHUD(){
+  const Z = ZONES[zone];
+  outText(Z.name, W / 2, 26, 15, '#fff');
+  outText('LEVEL ' + (zone + 1), W / 2, 62, 32, PINK);
+  const bx = 24, bw = W - 48, by = 72, bh = 16, f = Math.min(1, zoneReds / Z.reds);
+  ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.strokeStyle = NAVY; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 8); ctx.fill(); ctx.stroke();
+  if (f > 0) { ctx.fillStyle = PINK; ctx.beginPath(); ctx.roundRect(bx + 2, by + 2, Math.max(12, (bw - 4) * f), bh - 4, 6); ctx.fill(); }
+  for (let i = 0; i < CFG.HEARTS; i++) outText('♥', 34 + i * 26, 132, 24, i < hearts ? '#ff3b4a' : 'rgba(255,255,255,.6)');
+  outText(String(score), W - 24, 132, 24, '#fff', 'right');
+  const mult = Math.min(CFG.MAX_MULT, 1 + Math.floor(combo / CFG.COMBO_STEP));
+  if (combo >= 2) outText(combo + ' in a row  x' + mult, W / 2, 168, 16, '#ffd23f');
+}
+function draw(){
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - .5) * 10, (Math.random() - .5) * 10);
+  ctx.fillStyle = '#a8e4ff'; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(dots, -((dist * .3) % 20), 0, W + 20, H);
+  // candle skyline
+  ctx.globalAlpha = .2; ctx.lineWidth = 3; ctx.strokeStyle = NAVY;
+  for (const c of sky) {
+    const x = ((c.x - dist * .25) % (W + 60) + W + 60) % (W + 60) - 30;
+    ctx.fillStyle = c.g ? '#2fd87a' : '#ff4a4a';
+    ctx.fillRect(x - 10, GY - c.h, 20, c.h * .7);
+    ctx.beginPath(); ctx.moveTo(x, GY - c.h - 10); ctx.lineTo(x, GY); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // ground
+  ctx.fillStyle = '#7fcdf5'; ctx.fillRect(0, GY, W, H - GY);
+  ctx.fillStyle = NAVY; ctx.fillRect(0, GY, W, 5);
+  ctx.strokeStyle = 'rgba(28,20,69,.35)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (let i = 0; i < 8; i++) { const x = ((i * 56 - dist) % (W + 56) + W + 56) % (W + 56) - 20; ctx.beginPath(); ctx.moveTo(x, GY + 28 + (i % 3) * 22); ctx.lineTo(x + 18, GY + 28 + (i % 3) * 22); ctx.stroke(); }
+  objs.forEach(drawCandle);
+  drawWooby();
+  sparks.forEach(p => { ctx.globalAlpha = Math.max(0, p.life / .7); ctx.fillStyle = p.c; star(p.x, p.y, p.s); });
+  ctx.globalAlpha = 1;
+  floats.forEach(f => { ctx.globalAlpha = Math.min(1, f.life * 2); outText(f.txt, f.x, f.y, 22, f.col); }); ctx.globalAlpha = 1;
+  const rd = (CFG.HEARTS - Math.max(0, hearts)) / CFG.HEARTS * .5 + flash;
+  if (state !== 'start' && rd > 0) { ctx.fillStyle = 'rgba(255,40,60,' + Math.min(.95, rd) + ')'; ctx.fillRect(0, 0, W, H); }
+  ctx.restore();
+  if (state !== 'start') drawHUD();
+  if (banner > 0 && state === 'play') {
+    ctx.globalAlpha = Math.min(1, banner * 2.5, (1.8 - banner) * 4 + .2);
+    outText('LEVEL ' + (zone + 1), W / 2, 280, 46, '#fff');
+    outText(ZONES[zone].name, W / 2, 322, 24, PINK);
+    if (zone === 0) outText('tap to jump · tap again = double jump', W / 2, 360, 13, '#fff');
+    ctx.globalAlpha = 1;
+  }
+}
+
+let last = performance.now();
+function loop(now){ const dt = Math.min(.05, (now - last) / 1000); last = now; update(dt); draw(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+
+cv.addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); } });
+$('playBtn').onclick = $('retryBtn').onclick = $('againBtn').onclick = reset;
+$('shareBtn0').onclick = $('shareBtn1').onclick = $('shareBtn2').onclick = share;
+</script>
+</body>
+</html>
